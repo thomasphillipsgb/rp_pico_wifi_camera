@@ -28,7 +28,8 @@ name = "arducam-legacy"
 version = "0.1.2"
 dependencies = [
  "cc",
- "embedded-hal 0.2.7",
+ "embedded-hal 1.0.0",
+ "embedded-io",
 ]
 
 [[package]]

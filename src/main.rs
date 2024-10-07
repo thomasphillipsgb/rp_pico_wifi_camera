@@ -5,9 +5,9 @@
 #![no_std]
 #![no_main]
 
+use core::cell::RefCell;
 
 use arducam_legacy::Arducam;
-use cortex_m::prelude::_embedded_hal_blocking_delay_DelayMs;
 use cyw43::Control;
 use cyw43_pio::PioSpi;
 use defmt::{info, panic};
@@ -17,6 +17,7 @@ use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::usb::{Driver, Instance};
+use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_time::{Delay, Duration, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
@@ -106,7 +107,12 @@ async fn main(spawner: Spawner) {
     // let _arducam_spi_miso = Pin::new(Port::D, 3, PinMode::Alt(5));
     // let _arducam_spi_sck = Pin::new(Port::D, 1, PinMode::Alt(5));
     let arducam_cs = Output::new(p.PIN_0, Level::High);
+    static SPI_BUS: StaticCell<NoopMutex<RefCell<spi::Spi<'_, embassy_rp::peripherals::SPI0, spi::Blocking>>>> = StaticCell::new();
     let arducam_spi = embassy_rp::spi::Spi::new_blocking(p.SPI0, p.PIN_2, p.PIN_3, p.PIN_4, embassy_rp::spi::Config::default());
+    let arducam_spi_bus = NoopMutex::new(RefCell::new(arducam_spi));
+    let arducam_spi_bus = SPI_BUS.init(arducam_spi_bus);
+    let arducam_spi_device = embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice::new(arducam_spi_bus, arducam_cs);
+
     // let arducam_spi = todo!(); //PioSpi::new(&mut pio.common, pio.sm1, pio.irq0, arducam_cs, p.PIN_4, p.PIN_1, p.DMA_CH0);
     // let mut arducam_i2c_sda = Output::new(p.PIN_8, Level::Low);
     // arducam_i2c_sda.output_type(OutputType::OpenDrain);
@@ -115,9 +121,8 @@ async fn main(spawner: Spawner) {
     let arducam_i2c = embassy_rp::i2c::I2c::new_blocking(p.I2C0, p.PIN_9, p.PIN_8, embassy_rp::i2c::Config::default());
 
     let arducam = Arducam::new(
-        arducam_spi,
+        arducam_spi_device,
         arducam_i2c,
-        arducam_cs,
         arducam_legacy::Resolution::Res160x120, arducam_legacy::ImageFormat::JPEG
         );
 
@@ -127,14 +132,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(logger_task(logger_class)).unwrap();
     spawner.spawn(doot_camera(arducam)).unwrap();
 
-
-    // loop {
-    //     arducam.start_capture().unwrap();
-    //     while !arducam.is_capture_done().unwrap() { delay.delay_ms(10_u8); }
-    //     let mut image = [0_u8; 8192];
-    //     let length = arducam.get_fifo_length().unwrap();
-    //     let final_length = arducam.read_captured_image(image.iter_mut()).unwrap();
-    // }
 }
 
 // fn image_task(arducam: Arducam<!, embassy_rp::i2c::I2c<'_, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>, Output<'_>>) -> ! {
@@ -161,7 +158,7 @@ fn create_usb_config<'a>() -> Config<'a> {
 }
 
 #[embassy_executor::task]
-async fn doot_camera(mut arducam: Arducam<spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>, Output<'static>>) {
+async fn doot_camera(mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) {
     let delay = Duration::from_millis(10);
     let mut raw_delay = Delay{};
 

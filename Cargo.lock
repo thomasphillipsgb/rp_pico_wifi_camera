@@ -26,11 +26,10 @@ dependencies = [
 [[package]]
 name = "arducam-legacy"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3060ea0bd2df4d05d9a1ffd7663c5611a534b9cea5e1167de4e311983f61e393"
 dependencies = [
  "cc",
- "embedded-hal 0.2.7",
+ "embedded-hal 1.0.0",
+ "embedded-io",
 ]
 
 [[package]]

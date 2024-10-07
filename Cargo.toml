@@ -35,6 +35,6 @@ cyw43-pio = "0.2.0"
 
 log = "0.4"
 
-arducam-legacy = "0.1.0"
+arducam-legacy = { path = "arducam-legacy" }
 
 embassy-executor = { version = "0.6.0", features = ["task-arena-size-98304", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "integrated-timers"] }

@@ -123,7 +123,7 @@ async fn main(spawner: Spawner) {
     let arducam = Arducam::new(
         arducam_spi_device,
         arducam_i2c,
-        arducam_legacy::Resolution::Res160x120, arducam_legacy::ImageFormat::JPEG
+        arducam_legacy::Resolution::Res320x240, arducam_legacy::ImageFormat::JPEG
         );
 
 
@@ -133,11 +133,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(doot_camera(arducam)).unwrap();
 
 }
-
-// fn image_task(arducam: Arducam<!, embassy_rp::i2c::I2c<'_, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>, Output<'_>>) -> ! {
-//     spawn
-
-// }
 
 fn create_usb_config<'a>() -> Config<'a> {
     let mut config = Config::new(0xc0de, 0xcafe);
@@ -159,27 +154,34 @@ fn create_usb_config<'a>() -> Config<'a> {
 
 #[embassy_executor::task]
 async fn doot_camera(mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) {
-    let delay = Duration::from_millis(10);
+    let delay = Duration::from_millis(100);
     let mut raw_delay = Delay{};
 
     Timer::after(delay).await;
 
     log::info!("StartInit");
     arducam.init(&mut raw_delay).unwrap();
+    arducam.set_resolution(arducam_legacy::Resolution::Res320x240).unwrap();
     log::info!("CheckConnection");
     let connected = arducam.is_connected().unwrap();
     log::info!("Connected: {}", connected);
-    log::info!("StartCapture");
-    arducam.start_capture().unwrap();
-    log::info!("AwaitCaptureDone");
-    while !arducam.is_capture_done().unwrap() { Timer::after(delay).await; }
-    log::info!("CaptureDone");
-    let mut image = [0_u8; 8192];
-    let length = arducam.get_fifo_length().unwrap();
-    let final_length = arducam.read_captured_image(image.iter_mut()).unwrap();
-    log::info!("FifoLength: {}", length);
-    log::info!("FinalImageLength: {}", final_length);
-    log::info!("Image: {:?}", image);
+    // loop {
+        log::info!("StartCapture");
+        arducam.start_capture().unwrap();
+        log::info!("AwaitCaptureDone");
+        while !arducam.is_capture_done().unwrap() { Timer::after(delay).await; }
+        log::info!("CaptureDone");
+        let mut image = [0_u8; 8192];
+        let length = arducam.get_fifo_length().unwrap();
+        let final_length = arducam.read_captured_image(&mut image).unwrap();
+        log::info!("FifoLength: {}", length);
+        log::info!("FinalImageLength: {}", final_length);
+        // log::info!("Image: {:?}", image);
+        Timer::after(delay).await;
+        Timer::after(delay).await;
+        Timer::after(delay).await;
+        Timer::after(delay).await;
+    // }
 }
 
 #[embassy_executor::task]

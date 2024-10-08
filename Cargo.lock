@@ -30,6 +30,7 @@ dependencies = [
  "cc",
  "embedded-hal 1.0.0",
  "embedded-io",
+ "log",
 ]
 
 [[package]]

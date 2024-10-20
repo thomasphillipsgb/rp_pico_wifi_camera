@@ -45,8 +45,6 @@ bind_interrupts!(struct PIOIrqs {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Hello there!");
-
     let p = embassy_rp::init(Default::default());
 
     // Create the driver, from the HAL.
@@ -97,27 +95,19 @@ async fn main(spawner: Spawner) {
     spawner.spawn(cyw43_task(runner)).unwrap();
 
     wifi_chip.init(clm).await;
-    wifi_chip
-    .set_power_management(cyw43::PowerManagementMode::PowerSave)
-    .await;
+    wifi_chip.set_power_management(cyw43::PowerManagementMode::PowerSave).await;
 
-    // Example pinout configuration
-    // Adapt to your HAL crate
-    // let _arducam_spi_mosi = Pin::new(Port::D, 4, PinMode::Alt(5));
-    // let _arducam_spi_miso = Pin::new(Port::D, 3, PinMode::Alt(5));
-    // let _arducam_spi_sck = Pin::new(Port::D, 1, PinMode::Alt(5));
-    let arducam_cs = Output::new(p.PIN_0, Level::High);
+    let arducam_cs = Output::new(p.PIN_5, Level::High);
     static SPI_BUS: StaticCell<NoopMutex<RefCell<spi::Spi<'_, embassy_rp::peripherals::SPI0, spi::Blocking>>>> = StaticCell::new();
-    let arducam_spi = embassy_rp::spi::Spi::new_blocking(p.SPI0, p.PIN_2, p.PIN_3, p.PIN_4, embassy_rp::spi::Config::default());
+    let mut config = embassy_rp::spi::Config::default();
+    config.phase = spi::Phase::CaptureOnFirstTransition;
+    config.polarity = spi::Polarity::IdleLow;
+    config.frequency = 8_000_000;
+
+    let arducam_spi = embassy_rp::spi::Spi::new_blocking(p.SPI0, p.PIN_2, p.PIN_3, p.PIN_4, config);
     let arducam_spi_bus = NoopMutex::new(RefCell::new(arducam_spi));
     let arducam_spi_bus = SPI_BUS.init(arducam_spi_bus);
     let arducam_spi_device = embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice::new(arducam_spi_bus, arducam_cs);
-
-    // let arducam_spi = todo!(); //PioSpi::new(&mut pio.common, pio.sm1, pio.irq0, arducam_cs, p.PIN_4, p.PIN_1, p.DMA_CH0);
-    // let mut arducam_i2c_sda = Output::new(p.PIN_8, Level::Low);
-    // arducam_i2c_sda.output_type(OutputType::OpenDrain);
-    // let mut arducam_i2c_scl = Output::new(p.PIN_9, Level::Low);
-    // arducam_i2c_scl.output_type(OutputType::OpenDrain);
     let arducam_i2c = embassy_rp::i2c::I2c::new_blocking(p.I2C0, p.PIN_9, p.PIN_8, embassy_rp::i2c::Config::default());
 
     let arducam = Arducam::new(
@@ -154,34 +144,35 @@ fn create_usb_config<'a>() -> Config<'a> {
 
 #[embassy_executor::task]
 async fn doot_camera(mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) {
-    let delay = Duration::from_millis(100);
+    let camera_query_delay = Duration::from_millis(100);
+    let transfer_delay = Duration::from_millis(500);
     let mut raw_delay = Delay{};
 
-    Timer::after(delay).await;
+    Timer::after(camera_query_delay).await;
 
     log::info!("StartInit");
     arducam.init(&mut raw_delay).unwrap();
+
+    let chip_info = arducam.get_sensor_chipid().unwrap();
+    log::info!("ChipId: {:?}", chip_info);
     arducam.set_resolution(arducam_legacy::Resolution::Res320x240).unwrap();
     log::info!("CheckConnection");
     let connected = arducam.is_connected().unwrap();
     log::info!("Connected: {}", connected);
-    // loop {
+    loop {
         log::info!("StartCapture");
         arducam.start_capture().unwrap();
         log::info!("AwaitCaptureDone");
-        while !arducam.is_capture_done().unwrap() { Timer::after(delay).await; }
+        while !arducam.is_capture_done().unwrap() { Timer::after(camera_query_delay).await; }
         log::info!("CaptureDone");
         let mut image = [0_u8; 8192];
         let length = arducam.get_fifo_length().unwrap();
         let final_length = arducam.read_captured_image(&mut image).unwrap();
         log::info!("FifoLength: {}", length);
         log::info!("FinalImageLength: {}", final_length);
-        // log::info!("Image: {:?}", image);
-        Timer::after(delay).await;
-        Timer::after(delay).await;
-        Timer::after(delay).await;
-        Timer::after(delay).await;
-    // }
+
+        Timer::after(transfer_delay).await;
+    }
 }
 
 #[embassy_executor::task]

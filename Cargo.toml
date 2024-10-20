@@ -27,6 +27,7 @@ embassy-rp = {version = "0.2.0", features = ["critical-section-impl", "time-driv
 embassy-futures = { version = "0.1" }
 embassy-usb-logger = { version = "0.2.0" }
 embassy-time = "0.3.2"
+embassy-net = { version = "0.4", features = ["proto-ipv4", "dhcpv4", "tcp"] }
 embassy-usb = { version = "0.2.0", features = ["defmt"] }
 embassy-embedded-hal = "0.2.0"
 embassy-sync = "0.6.0"

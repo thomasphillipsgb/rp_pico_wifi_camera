@@ -6,12 +6,17 @@
 #![no_main]
 
 use core::cell::RefCell;
+use core::slice;
+use core::str::from_utf8;
 
 use arducam_legacy::Arducam;
-use cyw43::Control;
+use cyw43::{Control, NetDriver};
 use cyw43_pio::PioSpi;
 use defmt::{info, panic};
 use embassy_executor::Spawner;
+use embassy_net::tcp::TcpSocket;
+use embassy_net::{Config as NetConfig, Stack, StackResources};
+use embassy_rp::rtc::DayOfWeek;
 use embassy_rp::{bind_interrupts, spi};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
@@ -21,7 +26,8 @@ use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_time::{Delay, Duration, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
-use embassy_usb::{Builder, Config};
+use embassy_usb::Builder as UsbBuilder;
+use embassy_usb::Config as UsbConfig;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -49,21 +55,14 @@ async fn main(spawner: Spawner) {
 
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USB, USBIrqs);
-
-    // Create embassy-usb Config
     let config = create_usb_config();
-
-
-    // static USB_STATE: StaticCell<State> = StaticCell::new();
     static LOGGER_STATE: StaticCell<State> = StaticCell::new();
-
-    // let state = USB_STATE.init(State::new());
     let logger_state = LOGGER_STATE.init(State::new());
 
 
     #[allow(static_mut_refs)]
     let mut builder = unsafe {
-        Builder::new(
+        UsbBuilder::new(
             driver,
             config,
             &mut CONFIG_DESCRIPTOR,
@@ -80,6 +79,11 @@ async fn main(spawner: Spawner) {
     // Build the builder.
     let usb = builder.build();
 
+    spawner.spawn(usb_management_task(usb)).unwrap();
+    spawner.spawn(logger_task(logger_class)).unwrap();
+
+
+
     // Setup wifi chip
     let fw = include_bytes!("..\\43439A0.bin");
     let clm = include_bytes!("..\\43439A0_clm.bin");
@@ -91,11 +95,56 @@ async fn main(spawner: Spawner) {
 
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
-    let (_net_device, mut wifi_chip, runner) = cyw43::new(state, pwr, net_spi, fw).await;
+    let (net_device, mut control, runner) = cyw43::new(state, pwr, net_spi, fw).await;
     spawner.spawn(cyw43_task(runner)).unwrap();
 
-    wifi_chip.init(clm).await;
-    wifi_chip.set_power_management(cyw43::PowerManagementMode::PowerSave).await;
+    control.init(clm).await;
+    control.set_power_management(cyw43::PowerManagementMode::PowerSave).await;
+
+
+// Setup TCP server
+    let config = NetConfig::dhcpv4(Default::default());
+    //let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
+    //    address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 69, 2), 24),
+    //    dns_servers: Vec::new(),
+    //    gateway: Some(Ipv4Address::new(192, 168, 69, 1)),
+    //});
+
+    // Generate random seed
+    // let seed = rng.next_u64();
+
+    // Init network stack
+    static RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
+    static STACK: StaticCell<Stack<NetDriver>> = StaticCell::new();
+
+    let stack = embassy_net::Stack::new(
+        net_device,
+        config,
+        RESOURCES.init(embassy_net::StackResources::new()),
+        1234522
+    );
+    let stack = &*STACK.init(stack);
+    // Launch network task that runs `stack.run().await`
+    spawner.spawn(net_task(stack)).unwrap();
+
+    loop {
+        match control.join_wpa2("Phillips_2.4", "ThomasHouse@63!").await
+        {
+            Ok(_) => {
+                log::info!("join success");
+
+                break
+            },
+            Err(err) => {
+                log::info!("join failed with status={}", err.status);
+            }
+        }
+    }
+
+    // Wait for DHCP config
+    stack.wait_config_up().await;
+
+
 
     let arducam_cs = Output::new(p.PIN_5, Level::High);
     static SPI_BUS: StaticCell<NoopMutex<RefCell<spi::Spi<'_, embassy_rp::peripherals::SPI0, spi::Blocking>>>> = StaticCell::new();
@@ -113,19 +162,15 @@ async fn main(spawner: Spawner) {
     let arducam = Arducam::new(
         arducam_spi_device,
         arducam_i2c,
-        arducam_legacy::Resolution::Res320x240, arducam_legacy::ImageFormat::JPEG
+        arducam_legacy::Resolution::Res176x144, arducam_legacy::ImageFormat::JPEG
         );
 
-
-    spawner.spawn(blinky_task(wifi_chip)).unwrap();
-    spawner.spawn(usb_management_task(usb)).unwrap();
-    spawner.spawn(logger_task(logger_class)).unwrap();
-    spawner.spawn(doot_camera(arducam)).unwrap();
+    spawner.spawn(net_stack(stack, control, arducam)).unwrap();
 
 }
 
-fn create_usb_config<'a>() -> Config<'a> {
-    let mut config = Config::new(0xc0de, 0xcafe);
+fn create_usb_config<'a>() -> UsbConfig<'a> {
+    let mut config = UsbConfig::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Embassy");
     config.product = Some("USB-serial example");
     config.serial_number = Some("12345678");
@@ -143,9 +188,28 @@ fn create_usb_config<'a>() -> Config<'a> {
 }
 
 #[embassy_executor::task]
-async fn doot_camera(mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) {
+async fn doot_camera() {
+
+}
+
+#[embassy_executor::task]
+async fn usb_management_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB>>) {
+    usb.run().await
+}
+
+#[embassy_executor::task]
+async fn net_task(runner: &'static Stack<NetDriver<'static>>) -> ! {
+    runner.run().await
+}
+
+#[embassy_executor::task]
+async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43::Control<'static>, mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) -> ! {
+    let mut rx_buffer = [0; 8192];
+    let mut tx_buffer = [0; 8192];
+    let delay = Duration::from_secs(6);
+
     let camera_query_delay = Duration::from_millis(100);
-    let transfer_delay = Duration::from_millis(500);
+    let transfer_delay = Duration::from_millis(600);
     let mut raw_delay = Delay{};
 
     Timer::after(camera_query_delay).await;
@@ -159,44 +223,65 @@ async fn doot_camera(mut arducam: Arducam<embassy_embedded_hal::shared_bus::bloc
     log::info!("CheckConnection");
     let connected = arducam.is_connected().unwrap();
     log::info!("Connected: {}", connected);
+
+    const HOLDING: [u8; 8192] = [0_u8; 8192];
     loop {
-        log::info!("StartCapture");
-        arducam.start_capture().unwrap();
-        log::info!("AwaitCaptureDone");
-        while !arducam.is_capture_done().unwrap() { Timer::after(camera_query_delay).await; }
-        log::info!("CaptureDone");
-        let mut image = [0_u8; 8192];
-        let length = arducam.get_fifo_length().unwrap();
-        let final_length = arducam.read_captured_image(&mut image).unwrap();
-        log::info!("FifoLength: {}", length);
-        log::info!("FinalImageLength: {}", final_length);
+        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        socket.set_timeout(Some(Duration::from_secs(10)));
 
-        Timer::after(transfer_delay).await;
+        control.gpio_set(0, false).await;
+        log::info!("Listening on TCP:1234...");
+        if let Err(e) = socket.accept(1234).await {
+            log::info!("accept error: {:?}", e);
+            continue;
+        }
+
+        log::info!("Received connection from {:?}", socket.remote_endpoint());
+        control.gpio_set(0, true).await;
+        // log::info!("StartCapture");
+
+        loop {
+            arducam.start_capture().unwrap();
+
+            // log::info!("AwaitCaptureDone");
+            while !arducam.is_capture_done().unwrap() { Timer::after(camera_query_delay).await; }
+            // log::info!("CaptureDone");
+            let mut image = [0_u8; 8192];
+            let length = arducam.get_fifo_length().unwrap();
+            let slice = &mut image[..(length + 1) as usize];
+
+            let final_length = arducam.read_captured_image(slice, &HOLDING[..(length + 1) as usize]).unwrap();
+            log::info!("FifoLength: {}", length);
+            log::info!("FinalImageLength: {}", final_length);
+
+            Timer::after(transfer_delay).await;
+
+            let mut start = 1;
+            let end_len = length as usize;
+            match socket.write(&slice[start..end_len]).await {
+                Ok(size) => {
+                    log::info!("written: {:?}", size);
+                    start = start + size;
+                    Timer::after(delay).await;
+                }
+                Err(e) => {
+                    log::info!("write error: {:?}", e);
+                    break;
+                }
+            };
+
+            log::info!("FinishWrite: {:?}, {:?}", start, end_len);
+
+
+            Timer::after(delay).await;
+        }
+
     }
-}
-
-#[embassy_executor::task]
-async fn usb_management_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB>>) {
-    usb.run().await
 }
 
 #[embassy_executor::task]
 async fn logger_task(logger_class: CdcAcmClass<'static, Driver<'static, USB>>) {
     embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, logger_class).await
-}
-
-#[embassy_executor::task]
-async fn blinky_task(mut control: Control<'static>) {
-    let delay = Duration::from_secs(1);
-    loop {
-            // log::info!("led on!");
-            control.gpio_set(0, true).await;
-            Timer::after(delay).await;
-
-            // log::info!("led off!");
-            control.gpio_set(0, false).await;
-            Timer::after(delay).await;
-        }
 }
 
 #[embassy_executor::task]

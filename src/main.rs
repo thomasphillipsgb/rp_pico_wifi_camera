@@ -204,9 +204,9 @@ async fn net_task(runner: &'static Stack<NetDriver<'static>>) -> ! {
 
 #[embassy_executor::task]
 async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43::Control<'static>, mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) -> ! {
-    let mut rx_buffer = [0; 8192];
+    let mut rx_buffer = [0; 10];
     let mut tx_buffer = [0; 8192];
-    let delay = Duration::from_secs(6);
+    let delay = Duration::from_secs(8);
 
     let camera_query_delay = Duration::from_millis(100);
     let transfer_delay = Duration::from_millis(600);
@@ -243,26 +243,22 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
         loop {
             arducam.start_capture().unwrap();
 
-            // log::info!("AwaitCaptureDone");
             while !arducam.is_capture_done().unwrap() { Timer::after(camera_query_delay).await; }
-            // log::info!("CaptureDone");
             let mut image = [0_u8; 8192];
             let length = arducam.get_fifo_length().unwrap();
-            let slice = &mut image[..(length + 1) as usize];
 
-            let final_length = arducam.read_captured_image(slice, &HOLDING[..(length + 1) as usize]).unwrap();
+            let final_length = arducam.read_captured_image(&mut image).unwrap();
             log::info!("FifoLength: {}", length);
             log::info!("FinalImageLength: {}", final_length);
 
             Timer::after(transfer_delay).await;
 
-            let mut start = 1;
-            let end_len = length as usize;
-            match socket.write(&slice[start..end_len]).await {
+            let range = 0..=length as usize;
+            log::info!("Range: {:?}", range);
+
+            match socket.write(&image[range]).await {
                 Ok(size) => {
                     log::info!("written: {:?}", size);
-                    start = start + size;
-                    Timer::after(delay).await;
                 }
                 Err(e) => {
                     log::info!("write error: {:?}", e);
@@ -270,10 +266,7 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
                 }
             };
 
-            log::info!("FinishWrite: {:?}, {:?}", start, end_len);
-
-
-            Timer::after(delay).await;
+            log::info!("FinishWrite");
         }
 
     }

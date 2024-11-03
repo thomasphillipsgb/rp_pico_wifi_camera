@@ -224,7 +224,6 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
     let connected = arducam.is_connected().unwrap();
     log::info!("Connected: {}", connected);
 
-    const HOLDING: [u8; 8192] = [0_u8; 8192];
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(10)));

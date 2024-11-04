@@ -6,8 +6,6 @@
 #![no_main]
 
 use core::cell::RefCell;
-use core::slice;
-use core::str::from_utf8;
 
 use arducam_legacy::Arducam;
 use cyw43::{Control, NetDriver};
@@ -206,10 +204,8 @@ async fn net_task(runner: &'static Stack<NetDriver<'static>>) -> ! {
 async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43::Control<'static>, mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) -> ! {
     let mut rx_buffer = [0; 10];
     let mut tx_buffer = [0; 8192];
-    let delay = Duration::from_secs(8);
 
-    let camera_query_delay = Duration::from_millis(100);
-    let transfer_delay = Duration::from_millis(600);
+    let camera_query_delay = Duration::from_millis(50);
     let mut raw_delay = Delay{};
 
     Timer::after(camera_query_delay).await;
@@ -237,25 +233,41 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
 
         log::info!("Received connection from {:?}", socket.remote_endpoint());
         control.gpio_set(0, true).await;
-        // log::info!("StartCapture");
 
         loop {
             arducam.start_capture().unwrap();
+            log::info!("start_capture");
 
-            while !arducam.is_capture_done().unwrap() { Timer::after(camera_query_delay).await; }
-            let mut image = [0_u8; 8192];
+
+            while !arducam.is_capture_done().unwrap() {
+                Timer::after(camera_query_delay).await;
+            }
+
             let length = arducam.get_fifo_length().unwrap();
 
-            let final_length = arducam.read_captured_image(&mut image).unwrap();
-            log::info!("FifoLength: {}", length);
-            log::info!("FinalImageLength: {}", final_length);
+            let mut image = [0_u8; 8192];
+            let header = b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace;boundary=boundarydonotcross\r\n";
+            let mut offset = header.len();
+            image[..offset].copy_from_slice(header);
+            // log::info!("WrittenHeader, offset: {}", offset);
 
-            Timer::after(transfer_delay).await;
+            let t = b"\r\n--boundarydonotcross\r\nContent-Type: image/jpeg\r\nContent-Length: ";
+            image[offset..offset + t.len()].copy_from_slice(t);
+            offset += t.len();
+            // log::info!("WrittenBoundary");
 
-            let range = 0..=length as usize;
-            log::info!("Range: {:?}", range);
+            let mut buf = [0u8; 8];
+            format_no_std::show(&mut buf, format_args!("{}\r\n\r\n", length)).unwrap();
+            image[offset..offset + buf.len()].copy_from_slice(&buf);
+            offset += buf.len();
+            // log::info!("WrittenContentLength");
 
-            match socket.write(&image[range]).await {
+            arducam.read_captured_image(&mut image[offset..]).unwrap();
+            // log::info!("WrittenImage");
+
+
+            match socket.write(&image).await {
+            // match socket.write(&image).await {
                 Ok(size) => {
                     log::info!("written: {:?}", size);
                 }
@@ -265,7 +277,9 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
                 }
             };
 
-            log::info!("FinishWrite");
+            // Timer::after(transfer_delay).await;
+            // break;
+            // log::info!("FinishWrite");
         }
 
     }
@@ -276,16 +290,6 @@ async fn logger_task(logger_class: CdcAcmClass<'static, Driver<'static, USB>>) {
     embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, logger_class).await
 }
 
-#[embassy_executor::task]
-async fn echo_task(mut class: CdcAcmClass<'static, Driver<'static, USB>>) {
-    loop {
-        class.wait_connection().await;
-        log::info!("Connected");
-        let _ = echo(&mut class).await;
-        log::info!("Disconnected");
-    }
-}
-
 struct Disconnected {}
 
 impl From<EndpointError> for Disconnected {
@@ -294,16 +298,6 @@ impl From<EndpointError> for Disconnected {
             EndpointError::BufferOverflow => panic!("Buffer overflow"),
             EndpointError::Disabled => Disconnected {},
         }
-    }
-}
-
-async fn echo<'d, T: Instance + 'd>(class: &mut CdcAcmClass<'d, Driver<'d, T>>) -> Result<(), Disconnected> {
-    let mut buf = [0; 64];
-    loop {
-        let n = class.read_packet(&mut buf).await?;
-        let data = &buf[..n];
-        info!("data: {:x}", data);
-        class.write_packet(data).await?;
     }
 }
 

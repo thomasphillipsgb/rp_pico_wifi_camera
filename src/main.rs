@@ -237,7 +237,7 @@ async fn net_stack(stack: &'static Stack<'static>, mut control: cyw43::Control<'
         log::info!("Received connection from {:?}", socket.remote_endpoint());
         control.gpio_set(0, true).await;
 
-        let mut network_message = [0_u8; 32_000];
+        let mut network_message = [0_u8; 10_240];
 
         let header = b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace;boundary=boundarydonotcross\r\n";
         let mut offset = header.len();
@@ -260,17 +260,21 @@ async fn net_stack(stack: &'static Stack<'static>, mut control: cyw43::Control<'
             // network_message[offset..offset + buf.len()].copy_from_slice(&buf);
             // offset += buf.len();
 
-            arducam.read_captured_image(&mut network_message[offset..image_length as usize]).unwrap();
-            log::info!("ImageSize: {}", image_length);
+            arducam.read_captured_image(&mut network_message[offset..]).unwrap();
+            // log::info!("Image: {:?}", &network_message[offset..image_length as usize]);
+            // log::info!("ImageSize: {}", image_length);
             offset += image_length as usize;
 
             log::info!("Offset: {}", offset);
 
             // chunk network_message to TX_BUFFER_SIZE bytes and write to socket
             let mut start = 0;
-            while start < offset as usize {
+            while start <= offset as usize {
                 let end = (start + TX_BUFFER_SIZE).min(network_message.len());
-                match socket.write(&network_message[start..end]).await {
+                let buf = &network_message[start..end];
+                // log::info!("buf: {:?}", buf);
+
+                match socket.write(buf).await {
                     Ok(size) => {
                         start += size;
                     }

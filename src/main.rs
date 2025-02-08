@@ -8,12 +8,12 @@
 use core::cell::RefCell;
 
 use arducam_legacy::Arducam;
-use cyw43::{Control, NetDriver};
-use cyw43_pio::PioSpi;
+use cyw43::{Control, JoinOptions, NetDriver};
+use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use defmt::{info, panic};
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{Config as NetConfig, Stack, StackResources};
+use embassy_net::{Config as NetConfig, Runner, Stack, StackResources};
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::{bind_interrupts, spi};
 use embassy_rp::gpio::{Level, Output};
@@ -29,6 +29,7 @@ use embassy_usb::Config as UsbConfig;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use rand_core::RngCore;
+use embassy_net::new as new_net;
 
 type UsbInterruptHandler<T> = embassy_rp::usb::InterruptHandler<T>;
 type PIOInterruptHandler<T> = embassy_rp::pio::InterruptHandler<T>;
@@ -90,7 +91,7 @@ async fn main(spawner: Spawner) {
     let pwr = Output::new(p.PIN_23, Level::Low);
     let cs = Output::new(p.PIN_25, Level::High);
     let mut pio = Pio::new(p.PIO0, PIOIrqs);
-    let net_spi = PioSpi::new(&mut pio.common, pio.sm0, pio.irq0, cs, p.PIN_24, p.PIN_29, p.DMA_CH0);
+    let net_spi = PioSpi::new(&mut pio.common, pio.sm0, DEFAULT_CLOCK_DIVIDER, pio.irq0, cs, p.PIN_24, p.PIN_29, p.DMA_CH0);
 
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
@@ -114,11 +115,11 @@ async fn main(spawner: Spawner) {
 
     // Init network stack
     static RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
-    static STACK: StaticCell<Stack<NetDriver>> = StaticCell::new();
+    static STACK: StaticCell<Stack<'static>> = StaticCell::new();
 
     let mut rng = RoscRng;
 
-    let stack = embassy_net::Stack::new(
+    let (stack, runner) = new_net(
         net_device,
         config,
         RESOURCES.init(embassy_net::StackResources::new()),
@@ -126,10 +127,10 @@ async fn main(spawner: Spawner) {
     );
     let stack = &*STACK.init(stack);
     // Launch network task that runs `stack.run().await`
-    spawner.spawn(net_task(stack)).unwrap();
+    spawner.spawn(net_task(runner)).unwrap();
 
     loop {
-        match control.join_wpa2("Phillips_2.4", "ThomasHouse@63!").await
+        match control.join("Phillips_2.4", JoinOptions::new(b"ThomasHouse@63!")).await
         {
             Ok(_) => {
                 log::info!("join success");
@@ -190,23 +191,18 @@ fn create_usb_config<'a>() -> UsbConfig<'a> {
 }
 
 #[embassy_executor::task]
-async fn doot_camera() {
-
-}
-
-#[embassy_executor::task]
 async fn usb_management_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB>>) {
     usb.run().await
 }
 
 #[embassy_executor::task]
-async fn net_task(runner: &'static Stack<NetDriver<'static>>) -> ! {
+async fn net_task(mut runner: Runner<'static, NetDriver<'static>>) -> ! {
     runner.run().await
 }
 
 const TX_BUFFER_SIZE: usize = 1024;
 #[embassy_executor::task]
-async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43::Control<'static>, mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) -> ! {
+async fn net_stack(stack: &'static Stack<'static>, mut control: cyw43::Control<'static>, mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) -> ! {
     let mut rx_buffer = [0; 10];
     let mut tx_buffer = [0; TX_BUFFER_SIZE];
 
@@ -226,7 +222,7 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
     log::info!("Connected: {}", connected);
 
     loop {
-        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(10)));
         // let (a,b) = socket.split();
         // b.write(f);

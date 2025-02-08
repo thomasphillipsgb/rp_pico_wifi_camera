@@ -40,3 +40,4 @@ arducam-legacy = { path = "arducam-legacy" }
 
 embassy-executor = { version = "0.6.0", features = ["task-arena-size-98304", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "integrated-timers"] }
 format_no_std = "1.2.0"
+rand_core = "0.6.4"

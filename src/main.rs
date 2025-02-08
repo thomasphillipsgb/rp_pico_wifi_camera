@@ -14,7 +14,7 @@ use defmt::{info, panic};
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Config as NetConfig, Stack, StackResources};
-use embassy_rp::rtc::DayOfWeek;
+use embassy_rp::clocks::RoscRng;
 use embassy_rp::{bind_interrupts, spi};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
@@ -28,6 +28,7 @@ use embassy_usb::Builder as UsbBuilder;
 use embassy_usb::Config as UsbConfig;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
+use rand_core::RngCore;
 
 type UsbInterruptHandler<T> = embassy_rp::usb::InterruptHandler<T>;
 type PIOInterruptHandler<T> = embassy_rp::pio::InterruptHandler<T>;
@@ -115,11 +116,13 @@ async fn main(spawner: Spawner) {
     static RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
     static STACK: StaticCell<Stack<NetDriver>> = StaticCell::new();
 
+    let mut rng = RoscRng;
+
     let stack = embassy_net::Stack::new(
         net_device,
         config,
         RESOURCES.init(embassy_net::StackResources::new()),
-        1234522
+        rng.next_u64(),
     );
     let stack = &*STACK.init(stack);
     // Launch network task that runs `stack.run().await`
@@ -141,6 +144,7 @@ async fn main(spawner: Spawner) {
 
     // Wait for DHCP config
     stack.wait_config_up().await;
+    log::info!("Network configured {:?}", stack.config_v4());
 
 
 
@@ -160,7 +164,7 @@ async fn main(spawner: Spawner) {
     let arducam = Arducam::new(
         arducam_spi_device,
         arducam_i2c,
-        arducam_legacy::Resolution::Res176x144, arducam_legacy::ImageFormat::JPEG
+        arducam_legacy::Resolution::Res320x240, arducam_legacy::ImageFormat::JPEG
         );
 
     spawner.spawn(net_stack(stack, control, arducam)).unwrap();
@@ -200,10 +204,11 @@ async fn net_task(runner: &'static Stack<NetDriver<'static>>) -> ! {
     runner.run().await
 }
 
+const TX_BUFFER_SIZE: usize = 1024;
 #[embassy_executor::task]
 async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43::Control<'static>, mut arducam: Arducam<embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, spi::Spi<'static, embassy_rp::peripherals::SPI0, spi::Blocking>, Output<'static>>, embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Blocking>>) -> ! {
     let mut rx_buffer = [0; 10];
-    let mut tx_buffer = [0; 8192];
+    let mut tx_buffer = [0; TX_BUFFER_SIZE];
 
     let camera_query_delay = Duration::from_millis(50);
     let mut raw_delay = Delay{};
@@ -215,7 +220,7 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
 
     let chip_info = arducam.get_sensor_chipid().unwrap();
     log::info!("ChipId: {:?}", chip_info);
-    arducam.set_resolution(arducam_legacy::Resolution::Res1024x768).unwrap();
+    // arducam.set_resolution(arducam_legacy::Resolution::Res1024x768).unwrap();
     log::info!("CheckConnection");
     let connected = arducam.is_connected().unwrap();
     log::info!("Connected: {}", connected);
@@ -236,44 +241,40 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
         log::info!("Received connection from {:?}", socket.remote_endpoint());
         control.gpio_set(0, true).await;
 
+        let mut network_message = [0_u8; 32_000];
+
         'a: loop {
             arducam.start_capture().unwrap();
 
             while !arducam.is_capture_done().unwrap() {
                 Timer::after(camera_query_delay).await;
             }
+            let image_length = arducam.get_fifo_length().unwrap();
 
-            let length = arducam.get_fifo_length().unwrap();
 
-            let mut network_message = [0_u8; 65_536];
             let header = b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace;boundary=boundarydonotcross\r\n";
             let mut offset = header.len();
             network_message[..offset].copy_from_slice(header);
-            // log::info!("WrittenHeader, offset: {}", offset);
 
             let t = b"\r\n--boundarydonotcross\r\nContent-Type: image/jpeg\r\nContent-Length: ";
             network_message[offset..offset + t.len()].copy_from_slice(t);
             offset += t.len();
-            // log::info!("WrittenBoundary");
 
             let mut buf = [0u8; 10];
-            format_no_std::show(&mut buf, format_args!("{}\r\n\r\n", length)).unwrap();
+            format_no_std::show(&mut buf, format_args!("{}\r\n\r\n", image_length)).unwrap();
             network_message[offset..offset + buf.len()].copy_from_slice(&buf);
             offset += buf.len();
-            // log::info!("WrittenContentLength");
 
             arducam.read_captured_image(&mut network_message[offset..]).unwrap();
-            // log::info!("WrittenImage");
+            log::info!("ImageSize: {}", image_length);
+            log::info!("Offset: {}", offset);
 
-
-            // chunk network_message to 8192 bytes and write to socket
+            // chunk network_message to TX_BUFFER_SIZE bytes and write to socket
             let mut start = 0;
-            while start < network_message.len() {
-                let end = (start + 8192).min(network_message.len());
+            while start < offset + image_length as usize {
+                let end = (start + TX_BUFFER_SIZE).min(network_message.len());
                 match socket.write(&network_message[start..end]).await {
                     Ok(size) => {
-                        // log::info!("written: {:?}", size);
-                        // log::info!("written");
                         start += size;
                     }
                     Err(e) => {

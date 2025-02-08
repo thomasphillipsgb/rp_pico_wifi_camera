@@ -220,7 +220,7 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
 
     let chip_info = arducam.get_sensor_chipid().unwrap();
     log::info!("ChipId: {:?}", chip_info);
-    // arducam.set_resolution(arducam_legacy::Resolution::Res1024x768).unwrap();
+    arducam.set_resolution(arducam_legacy::Resolution::Res320x240).unwrap();
     log::info!("CheckConnection");
     let connected = arducam.is_connected().unwrap();
     log::info!("Connected: {}", connected);
@@ -243,7 +243,11 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
 
         let mut network_message = [0_u8; 32_000];
 
+        let header = b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace;boundary=boundarydonotcross\r\n";
+        let mut offset = header.len();
+        network_message[..offset].copy_from_slice(header);
         'a: loop {
+
             arducam.start_capture().unwrap();
 
             while !arducam.is_capture_done().unwrap() {
@@ -251,27 +255,24 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
             }
             let image_length = arducam.get_fifo_length().unwrap();
 
-
-            let header = b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace;boundary=boundarydonotcross\r\n";
-            let mut offset = header.len();
-            network_message[..offset].copy_from_slice(header);
-
-            let t = b"\r\n--boundarydonotcross\r\nContent-Type: image/jpeg\r\nContent-Length: ";
+            let t = b"\r\n--boundarydonotcross\r\nContent-Type: image/jpeg\r\n\r\n";
             network_message[offset..offset + t.len()].copy_from_slice(t);
             offset += t.len();
 
-            let mut buf = [0u8; 10];
-            format_no_std::show(&mut buf, format_args!("{}\r\n\r\n", image_length)).unwrap();
-            network_message[offset..offset + buf.len()].copy_from_slice(&buf);
-            offset += buf.len();
+            // let mut buf = [0u8; 10];
+            // format_no_std::show(&mut buf, format_args!("{}\r\n\r\n", image_length)).unwrap();
+            // network_message[offset..offset + buf.len()].copy_from_slice(&buf);
+            // offset += buf.len();
 
-            arducam.read_captured_image(&mut network_message[offset..]).unwrap();
+            arducam.read_captured_image(&mut network_message[offset..image_length as usize]).unwrap();
             log::info!("ImageSize: {}", image_length);
+            offset += image_length as usize;
+
             log::info!("Offset: {}", offset);
 
             // chunk network_message to TX_BUFFER_SIZE bytes and write to socket
             let mut start = 0;
-            while start < offset + image_length as usize {
+            while start < offset as usize {
                 let end = (start + TX_BUFFER_SIZE).min(network_message.len());
                 match socket.write(&network_message[start..end]).await {
                     Ok(size) => {
@@ -283,6 +284,8 @@ async fn net_stack(stack: &'static Stack<NetDriver<'static>>, mut control: cyw43
                     }
                 }
             }
+            network_message[0..offset].fill(0);
+            offset = 0;
         }
 
     }
